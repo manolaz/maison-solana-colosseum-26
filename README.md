@@ -13,7 +13,7 @@
 
 **Sub-second, ultra-low-cost cross-border remittances with atomic multi-destination split routing, Token-2022 extension hooks, and 1-click Solana Blinks.**
 
-[Key Innovations](#-key-innovations) • [Architecture](#-protocol-architecture) • [Smart Contracts](#-on-chain-contracts-programsmaison-core) • [Token Extensions](#-token-2022--standards) • [Testing & Verification](#-deterministic-verification) • [Colosseum Scope](#-colosseum-hackathon-scope)
+[Key Innovations](#-key-innovations) • [Architecture](#-protocol-architecture) • [Workflows & Diagrams](#-deep-dive-workflow-diagrams) • [Smart Contracts](#-on-chain-contracts-programsmaison-core) • [Token Extensions](#-token-2022--standards) • [Testing & Verification](#-deterministic-verification) • [Colosseum Scope](#-colosseum-hackathon-scope)
 
 </div>
 
@@ -51,38 +51,151 @@ Global remittances exceed **$860 Billion annually**, yet remitters and migrant w
 
 ## 🏗️ Protocol Architecture
 
+### End-to-End System Architecture & Data Flow
+
 ```mermaid
 flowchart TD
-    subgraph Remitters[" Remittance Originators "]
-        A1[Solana Wallet / Blink]
-        A2[Base CCTP Bridge]
-        A3[Tempo TIP-403 Flow]
+    subgraph S1["1. Remittance Ingress Rails"]
+        R1["Solana DApp / Wallet"]
+        R2["Solana Actions & Blinks"]
+        R3["Base CCTP Bridge (Domain 6)"]
+        R4["Tempo TIP-403 Network"]
     end
 
-    subgraph MaisonCore[" Maison Core Protocol (programs/maison-core) "]
-        B[Protocol Config PDA\n(Fee Treasury & 2-Step Governance)]
-        C[RouteProfile PDA\n(Split Allocations & Daily Spending Cap)]
-        D[RemittanceEscrow PDA\n(Multi-Modal Claim Vault)]
-        E[SettlementRecord PDA\n(Cross-Chain Nonce Verification)]
+    subgraph S2["2. Maison Core Protocol Layer"]
+        PC["ProtocolConfig PDA<br/>(Governance, Treasury, Circuit Breaker)"]
+        RP["RouteProfile PDA<br/>(Split Rules, 24h Rolling Limits)"]
+        RE["RemittanceEscrow PDA<br/>(Timelocked Vault, Claim Commitments)"]
+        SR["SettlementRecord PDA<br/>(Cross-Chain Nonce Verification)"]
+        DEX["DEX CPI Router<br/>(Jupiter / Whirlpool / Raydium)"]
     end
 
-    subgraph Execution[" Atomic Distribution & Vaults "]
-        F1["Recipient A: Immediate Living Expenses (70%)"]
-        F2["Recipient B: Timelocked Family Savings Vault (20%)"]
-        F3["Recipient C: Emergency / Education Escrow (10%)"]
-        T["Protocol Treasury (25 bps)"]
+    subgraph S3["3. Security & Fee Collection"]
+        TF["Protocol Fee Deduction<br/>(25 bps Safety Cap)"]
+        TR["Fee Treasury Vault"]
     end
 
-    A1 -->|Initiate / Route| C
-    A1 -->|Escrow Deposit| D
-    A2 -->|Relayed Burn/Mint| E
-    A3 -->|Passkey Attestation| E
+    subgraph S4["4. Settlement & Disbursement Destinations"]
+        D1["Beneficiary A: Immediate Living Expenses (70%)"]
+        D2["Beneficiary B: Family Savings Vault (20%)"]
+        D3["Beneficiary C: Emergency / Education Escrow (10%)"]
+        D4["Off-Ramp Relayer<br/>(GCash / Pix / M-Pesa / Bank Rails)"]
+    end
 
-    C -->|Atomic Split| Execution
-    D -->|Claim / Preimage / Passkey| Execution
-    E -->|Finalize Settlement| Execution
-    C -.->|Deduct Fee| T
-    D -.->|Deduct Fee| T
+    R1 -->|"Direct Route"| RP
+    R2 -->|"1-Click Claim"| RE
+    R3 -->|"CCTP Attestation"| SR
+    R4 -->|"Passkey Signature"| SR
+
+    RP -->|"Check Limit & Deduct"| TF
+    RE -->|"Escrow Lock & Deduct"| TF
+    TF -->|"Transfer Checked"| TR
+
+    RP -->|"Swap Input Tokens"| DEX
+    DEX -->|"Disburse Splits"| D1
+    DEX -->|"Disburse Splits"| D2
+    DEX -->|"Disburse Splits"| D3
+
+    RE -->|"Direct / Preimage / Passkey Claim"| D1
+    SR -->|"Finalize Inbound Settlement"| D4
+```
+
+---
+
+## 🔄 Deep-Dive Workflow Diagrams
+
+### 1. Multi-Destination Split Routing Mechanics
+When diaspora workers send money home, family capital is needed in distinct buckets. Maison splits transactions atomically in a single Solana transaction with zero precision loss.
+
+```mermaid
+flowchart TD
+    Start["Sender Initiates Remittance<br/>($1,000 USDC)"] --> Validate["Validate RouteProfile PDA<br/>(Active Status & Daily Limit Check)"]
+    Validate --> FeeCalc["Calculate Protocol Fee<br/>(25 bps = $2.50)"]
+    FeeCalc --> FeeTransfer["Transfer $2.50 to Treasury<br/>(anchor_spl transfer_checked)"]
+    FeeTransfer --> NetAmount["Net Remittance for Distribution<br/>($997.50)"]
+    
+    NetAmount --> SplitCalc["Compute Basis Points Splits<br/>(Total = 10,000 bps)"]
+    
+    SplitCalc --> S1["Split 1: Living Expenses (7,000 bps)<br/>$698.25 -> Mom's Wallet"]
+    SplitCalc --> S2["Split 2: Family Savings (2,000 bps)<br/>$199.50 -> Locked Savings Vault"]
+    SplitCalc --> S3["Split 3: Education Fund (1,000 bps)<br/>$99.75 + Rounding Dust -> Tuition Vault"]
+    
+    S1 --> Finalize["Atomic Single-Transaction Execution<br/>Zero Dust Loss • Emits SplitRoutingExecuted Event"]
+    S2 --> Finalize
+    S3 --> Finalize
+```
+
+---
+
+### 2. Multi-Modal Escrow Lifecycle & Claim Verification
+Escrow deposits are safeguarded under timelocks and can be claimed through multiple authentication paths tailored for unbanked and non-crypto-native beneficiaries.
+
+```mermaid
+flowchart TD
+    Init["Sender Deposits Tokens<br/>into RemittanceEscrow PDA"] --> Locked["Tokens Held in Escrow Vault<br/>(Token-2022 PDA Authority)"]
+    
+    Locked --> Branch{"Claim Verification Mode"}
+    
+    Branch -->|"Direct Signature"| Direct["Beneficiary Signs Transaction<br/>Matches escrow.beneficiary"]
+    Branch -->|"Preimage Hash"| HashLock["Claimant Submits Secret Voucher<br/>SHA-256(preimage) == claim_commitment"]
+    Branch -->|"WebAuthn / Passkey"| Passkey["Biometric Signature Verification<br/>Tempo TIP-403 clientDataJSON Proof"]
+    Branch -->|"Timelock Elapsed"| Expired["Clock >= expiry_timestamp<br/>Unclaimed Status Active"]
+    
+    Direct --> Release["Escrow Vault Transfers Tokens to Claimant<br/>Status -> Claimed • Emits EscrowClaimed"]
+    HashLock --> Release
+    Passkey --> Release
+    
+    Expired --> Refund["refund_escrow Called by Sender<br/>Vault Returns Tokens to Sender • Emits EscrowRefunded"]
+```
+
+---
+
+### 3. Cross-Chain Settlement Ingress (Base CCTP & Tempo)
+Maison connects liquidity from EVM (Base via Circle CCTP) and Tempo payment networks directly to Solana recipients with on-chain nonce replay protection.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Sender as Remitter (Base / Tempo)
+    participant BaseBridge as Base CCTP / Tempo Rail
+    participant Relayer as Maison Relayer Engine
+    participant SolanaMaison as programs/maison-core
+    participant Recipient as Beneficiary / Local Vault
+
+    Sender->>BaseBridge: Burn USDC / Initiate Remittance
+    BaseBridge-->>Relayer: Emit MessageTransmitter Nonce & Attestation
+    Relayer->>SolanaMaison: settle_cross_chain(source_domain, remote_nonce, amount)
+    Note over SolanaMaison: Check Replay Prevention PDA<br/>["settlement", domain, nonce]
+    Note over SolanaMaison: Verify TIP-403 Compliance Flag
+    SolanaMaison->>Recipient: transfer_checked(amount) to Beneficiary Account
+    SolanaMaison-->>Relayer: Emit CrossChainSettled Event
+    Relayer->>Recipient: Send WhatsApp / SMS Confirmation Notice
+```
+
+---
+
+### 4. 1-Click Solana Blink / Action Claim Flow
+Recipients without installed Solana wallets can claim funds directly through chat or social media links via Solana Actions & Blinks.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as Beneficiary
+    participant Client as Twitter / Dialect / Mobile Client
+    participant BlinkAPI as Maison Actions API (/api/actions/claim)
+    participant CoreProgram as programs/maison-core
+    participant Vault as Escrow Vault PDA
+
+    User->>Client: Clicks Maison Remittance Blink URL
+    Client->>BlinkAPI: GET /api/actions/claim?ref=REF_ID
+    BlinkAPI-->>Client: Returns Action Metadata (Title, Amount, Claim Button)
+    User->>Client: Enters Claim OTP Code / Taps Claim
+    Client->>BlinkAPI: POST /api/actions/claim with Preimage & User Pubkey
+    BlinkAPI-->>Client: Returns Serialized claim_escrow Transaction
+    User->>Client: Signs Transaction via Mobile Wallet
+    Client->>CoreProgram: Broadcasts claim_escrow(preimage)
+    CoreProgram->>Vault: Transfers Net Remittance to User ATA
+    CoreProgram-->>User: Instant Confirmation & Sub-Second Payout
 ```
 
 ---
